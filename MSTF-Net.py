@@ -199,19 +199,21 @@ class ConvDeconv3d(nn.Module):
 
 
 class MSTFNet(nn.Module):
-    def __init__(self,frame,window,units,layer):
+    def __init__(self,frame,window,units,layer,dim_in,dim_out,dim_ext,h,w):
         super().__init__()
         self.frame=frame
         self.window=window
         self.units=units
         self.layer=layer
-        self.convlstm = nn.Sequential(
-            E3DLSTM(input_shape=(units, frame, 12, 16), hidden_size=units, num_layers=layer, kernel_size=(3, 3, 3)),
+        self.h=h
+        self.w=w
+        self.e3dlstm = nn.Sequential(
+            E3DLSTM(input_shape=(units, frame, h, w), hidden_size=units, num_layers=layer, kernel_size=(3, 3, 3)),
             nn.ReLU(),
         )
 
         self.conv3d_encoder = nn.Sequential(
-            nn.Conv3d(2, units, kernel_size=(3, 3, 3), padding=(1, 1, 1)),  # b c d(frame) h w
+            nn.Conv3d(dim_in, units, kernel_size=(3, 3, 3), padding=(1, 1, 1)),  # b c d(frame) h w
             nn.ReLU(),
             nn.Conv3d(units, units, kernel_size=(3, 3, 3), padding=(1, 1, 1)),  # 2
             nn.ReLU()
@@ -220,35 +222,31 @@ class MSTFNet(nn.Module):
         self.conv3d_decoder = nn.Sequential(
             nn.Conv3d(units, units, kernel_size=(3, 3, 3), padding=(1, 1, 1)),  # 5
             nn.ReLU(),
-            nn.Conv3d(units, 2, kernel_size=(3, 3, 3), padding=(1, 1, 1)),  # 2
+            nn.Conv3d(units, dim_out, kernel_size=(3, 3, 3), padding=(1, 1, 1)),  # 2
         )
 
         self.vector = nn.Sequential(
-            nn.Linear(56, 10),
+            nn.Linear(dim_ext, 10),
             nn.ReLU(),
-            nn.Linear(10, 2 * 12 * 16),
+            nn.Linear(10, 2 * h * w),
         )
 
         self.map= nn.Sequential(
-            nn.Conv2d(2*frame,2,1)
+            nn.Conv2d(2*frame,dim_out,kernel_size=(1, 1))
         )
 
 
-    def forward(self, x1, x2,y=None): #x1:videos (b,f,c,h,w), f=n*t, n=fragments, t=frames in each fragment
+    def forward(self, x1, x2,y=None): #x1:videos (b,f,c,h,w), f=n*t, n=fragments, t=frames in each fragment; x2: external factors (b, features)
         # encoder
-        lis = []
-        x1 = rearrange(x1, 'b (n t) c h w -> n b c t h w ', n=self.window)
-        for t in range(self.window):
-            x1_n = self.conv3d_encoder(x1[t])  # 维度不要弄错了
-            lis.append(x1_n)
-        x1 = torch.stack(lis)
-        x1 = self.convlstm(x1)
-        self.attns = self.convlstm[0].attns
+        x1 = rearrange(x1, 'b (n t) c h w -> (n b) c t h w ', n=self.window)
+        x1= self.conv3d_encoder(x1)
+        x1 = rearrange(x1, '(n b) c t h w -> n b c t h w ', n=self.window)
+        x1 = self.e3dlstm(x1)
         x1=self.conv3d_decoder(x1)
         x1 = rearrange(x1, 'b c t h w -> b (c t) h w')
         x1 = self.map(x1)
         x2 = self.vector(x2)
-        x2=torch.reshape(x2,(-1,2,12,16))
+        x2=torch.reshape(x2,(-1,2,self.h,self.w))
         x = x1+x2
         if y is not None:
             loss=F.mse_loss(x, y)
@@ -257,10 +255,10 @@ class MSTFNet(nn.Module):
             return x
 
 if __name__ == '__main__':
-    x1 = np.ones((2,12,2,12, 16))  # videos (b,f,c,h,w), b=batch size, f=n*t, n=fragments, t=frames in each fragment, c=channel, h=height, w=width
+    x1 = np.ones((1,12,2,12, 16))  # videos (b,f,c,h,w), b=batch size, f=n*t, n=fragments, t=frames in each fragment, c=channel, h=height, w=width
     x1 = torch.tensor(x1, dtype=torch.float).cuda()
-    x2 = np.ones((2, 56))  # external factors (b, feathers)
+    x2 = np.ones((1, 56))  # external factors (b, feathers)
     x2 = torch.tensor(x2, dtype=torch.float).cuda()
-    t_model = MSTFNet(4,3,32,2).cuda()
-    y = t_model(x1, x2)
+    model = MSTFNet(4,3,32,2,2,2,56,12,16).cuda()
+    y = model(x1, x2) # (b ,c ,h, w)
     print(y.shape)
